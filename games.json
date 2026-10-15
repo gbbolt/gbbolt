@@ -53,6 +53,13 @@
     "title": "Dragon Warrior Monsters",
     "repo": "gbbolt/dwm-gbbolt",
     "strict": false,
-    "description": "Work in progress: the whole 2 MiB Game Boy Color cartridge, 128 banks, being explained bank by bank - with the game's opening played on an emulated Game Boy Color, in its own colours."
+    "description": "Terry's monster-taming journey through the GreatTree's gate worlds: a card for each of the 217 monsters with breeding pairs and where it is met, the battle engine and its AI, the gate worlds floor by floor, all maps, texts and songs, and the opening played on an emulated Game Boy Color."
+  },
+  {
+    "id": "linksawakening",
+    "title": "The Legend of Zelda: Link's Awakening",
+    "repo": "gbbolt/linksawakening-gbbolt",
+    "strict": false,
+    "description": "Work in progress: the whole 512 KiB cartridge, 32 banks, being explained bank by bank - Link, Koholint's rooms, its enemies and characters, with the game's opening played on an emulated Game Boy."
   }
 ]

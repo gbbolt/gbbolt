@@ -42,8 +42,79 @@ def main():
     postprocess()
 
 
+def postprocess_banked(tables):
+    """Banked ROMs: every table the tracer found (<rom>.tables.json: "bank:addr" -> entry names) as `dw`."""
+    names = {}
+    for line in open(os.path.splitext(ROM)[0] + '.sym'):
+        if not line.startswith(';') and ' .' not in line:
+            loc, name = line.split()
+            names[name] = loc
+    for f in sorted(os.listdir(SRC)):
+        if not f.startswith('bank_'):
+            continue
+        path = os.path.join(SRC, f)
+        lines = open(path).read().split('\n')
+        out, i = [], 0
+        while i < len(lines):
+            out.append(lines[i])
+            name = lines[i].rstrip(':') if lines[i].endswith(':') and not lines[i].startswith(('\t', ' ')) else None
+            entries = tables.get(names.get(name)) if name else None
+            i += 1
+            if not entries:
+                continue
+            data = []
+            while len(data) < 2 * len(entries) and i < len(lines) and lines[i].strip().startswith('db '):
+                data += [int(v.strip()[1:], 16) for v in lines[i].strip()[3:].split(',')]
+                i += 1
+            n = min(len(entries), len(data) // 2)
+            out += ['\tdw {}'.format(e) for e in entries[:n]]
+            if len(data) > 2 * n:
+                out.append('\tdb ' + ', '.join('${:02x}'.format(b) for b in data[2 * n:]))
+        open(path, 'w', newline='\n').write('\n'.join(out))
+
+
+def fix_undefined():
+    """Labels mgbdis did not place (code read at two alignments): refer to them by address instead, and
+    say so in a comment, until the ROM links."""
+    import re
+    import build as b
+    addr = {}
+    for line in open(os.path.splitext(ROM)[0] + '.sym'):
+        if not line.startswith(';') and ' .' not in line:
+            loc, name = line.split()
+            addr[name] = '$' + loc.split(':')[1]
+    for _ in range(20):
+        ok, msg = b.build(quiet=True)
+        print(msg.split('\n')[0])
+        if ok:
+            return
+        bad = re.findall(r"Undefined symbol `([^`]+)`\s+at (\S+?)\((\d+)\)", msg)
+        if not bad:
+            print(msg[:2000])
+            return
+        for sym, f, ln in bad:
+            path = os.path.join(SRC, os.path.basename(f))
+            lines = open(path).read().split('\n')
+            k = int(ln) - 1
+            if sym in addr and sym in lines[k] and ';' not in lines[k]:
+                lines[k] = re.sub(r'\b' + re.escape(sym) + r'\b', addr[sym], lines[k]) + \
+                    ' ; {} (not an instruction start in this disassembly)'.format(sym)
+            open(path, 'w', newline='\n').write('\n'.join(lines))
+
+
 def postprocess():
     """Jump tables as `dw Label`, and an (empty) ram.inc for named variables."""
+    tj = os.path.splitext(ROM)[0] + '.tables.json'
+    if os.path.getsize(ROM) > 0x8000 and os.path.exists(tj):
+        import json
+        postprocess_banked(json.load(open(tj)))
+        finish()
+        fix_undefined()
+        return
+    finish_single()
+
+
+def finish_single():
     labels = {}
     for line in open(os.path.splitext(ROM)[0] + '.sym'):
         if line.startswith(';') or ' .' in line:
@@ -68,7 +139,10 @@ def postprocess():
             continue
         i += 1
     open(path, 'w', newline='\n').write('\n'.join(out))
+    finish()
 
+
+def finish():
     open(os.path.join(SRC, 'ram.inc'), 'w', newline='\n').write(
         '; Named RAM / IO addresses.\n'
         '; Format: DEF name EQU $addr ;@ type description\n'
