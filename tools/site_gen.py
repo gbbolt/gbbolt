@@ -139,7 +139,7 @@ def unit_data(project, u, res, edges_from, edges_to):
 
     d = {
         'n': u.name, 's': u.start, 'e': u.end, 'k': u.kind,
-        'st': res.status if u.annotated else 'none',
+        'st': (res.status if res.status != 'none' else 'checked') if u.annotated else 'none',
         'lines': out_lines,
         'file': os.path.relpath(os.path.join(build.SRC, lines[u.first_line].file), build.ROOT).replace(os.sep, '/'),
         'foreign': foreign,
@@ -630,7 +630,8 @@ def generate(project):
     for u in p.units:
         if u.kind != 'code':
             continue
-        c = STATUS_CODE[results[u.name].status] if u.annotated else 'c'
+        st = results[u.name].status
+        c = (STATUS_CODE[st] if st != 'none' else 'k') if u.annotated else 'c'   # annotated, not verified yet: checked
         for a in range(u.start, min(u.end, len(rommap))):
             rommap[a] = c
     # bytes inside code units that are data (db lines) stay 'd'
