@@ -2201,6 +2201,7 @@ function tableCell(c) {
     return it ? `<div class="csound">${playerHtml(it.file, it.seconds)}<a href="#/music/${itemKey(it)}">${esc(c.text || 'piano roll')} →</a></div>` : `<span style="color:var(--muted)">${esc(c.text || c.sound)} (not rendered)</span>`;
   }
   if (c.code) return `<a href="#/code/${encodeURIComponent(c.code)}">${esc(c.text || c.code)}</a>`;
+  if (c.href) return `<a href="${esc(c.href)}" download>${esc(c.text || c.href)}</a>`;
   if (c.image) return `<span class="timg" data-img="${esc(JSON.stringify(c.image))}"></span>${c.text ? ' ' + esc(c.text) : ''}`;
   return esc(c.text || '');
 }

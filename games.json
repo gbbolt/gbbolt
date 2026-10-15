@@ -60,6 +60,6 @@
     "title": "The Legend of Zelda: Link's Awakening",
     "repo": "gbbolt/linksawakening-gbbolt",
     "strict": false,
-    "description": "Work in progress: the whole 512 KiB cartridge, 32 banks, being explained bank by bank - Link, Koholint's rooms, its enemies and characters, with the game's opening played on an emulated Game Boy."
+    "description": "Koholint Island in full: the overworld and every dungeon drawn by the game's own room loader with each room's enemies, warps and chests, a card for every enemy, boss and character with its sprite frames and how it reacts to each weapon, items and object physics, all 640 dialogs, the Shadow Nightmare, the ending, all music and sound, and the data as JSON and CSV."
   }
 ]
