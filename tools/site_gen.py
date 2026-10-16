@@ -8,7 +8,7 @@ import re
 
 import build
 from pseudo import HELPER_DOCS, parse_signature
-from sm83 import CPU
+from sm83 import CPU, MBC
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE = os.path.join(HERE, 'viewer.html')
@@ -185,26 +185,46 @@ def resolve_bgp():
     return int(str(v).replace('$', '0x'), 0) if v is not None else None
 
 
+def resolve_obp():
+    """game.json "obp": [OBP0, OBP1], the sprite palettes the game sets (the viewer's default is $E4, $C4)."""
+    v = build.GAME.get('obp')
+    return [int(str(x).replace('$', '0x'), 0) for x in v] if v else None
+
+
 def run_loader(project, spec):
     """Run a tile-loading routine in the SM83 interpreter; return VRAM tile data ($8000-$97FF).
 
     spec: 'Routine' or 'Routine(hl=Label,bc=$1000)'; several joined with '+' run one
     after the other on the same VRAM (a base tileset, then what a screen loads over it).
+    An argument that is not a register sets a byte of RAM first: 'wFoo=3' or '$FF94=$1E'.
+    Banked games: the routine's own bank is switched in (for a bank-0 routine, the bank of a ROM label
+    passed in a register, e.g. CopyData(hl=SomeTiles,de=$9000,bc=$200)), and its bank writes switch banks.
     """
     mem = bytearray(0x10000)
     mem[0:0x8000] = project.rom[0:0x8000]
     mem[0xFF44] = 0x91                 # rLY: in VBlank, for loaders that switch the LCD off first
+    mbc = MBC(bytes(project.rom), mem) if build.BANKED else None
+    regs = ('a', 'b', 'c', 'd', 'e', 'h', 'l', 'f', 'af', 'bc', 'de', 'hl')
     for step in spec.split('+'):
         m = re.match(r'^(\w+)(?:\((.*)\))?$', step)
         name, args = m.group(1), m.group(2) or ''
-        cpu = CPU(mem)
+        bank = build.SYM_BANK.get(name, 0) if project.syms.get(name, 0) >= 0x4000 else 0
+        cpu = CPU(mem, mbc)
         for arg in filter(None, args.split(',')):
-            reg, _, val = arg.partition('=')
+            reg, _, val = arg.strip().partition('=')
             v = resolve_value(project, val)
-            if len(reg) == 2:
-                cpu.setp(reg, v)
-            else:
-                setattr(cpu, reg, v & 0xFF)
+            if reg in regs:
+                if not bank and val.strip() in project.syms and project.syms[val.strip()] >= 0x4000:
+                    bank = build.SYM_BANK.get(val.strip(), 0)
+                if len(reg) == 2:
+                    cpu.setp(reg, v)
+                else:
+                    setattr(cpu, reg, v & 0xFF)
+            else:                          # a RAM byte
+                v_addr = project.parsed.vars[reg]['addr'] if reg in project.parsed.vars else resolve_value(project, reg)
+                mem[v_addr] = v & 0xFF
+        if mbc is not None and bank:
+            mbc.map(bank)
         cpu.sp = build.GAME['test_memory']['stack_top']
         cpu.call(project.syms[name], max_steps=2000000)
     return bytes(mem[0x8000:0x9800])
@@ -372,8 +392,18 @@ def collect_assets(project):
             item['tileset'] = keys[0]
             item['tilesets'] = keys
         if a['type'] == 'oam':
+            # (y, x, tile, attributes) entries. frame=N: N bytes per frame (several pictures); signed: the y / x
+            # are signed offsets from an origin (sprite lists drawn around an object); tall: 8x16 sprites.
+            # Entries of four $FF bytes are unused places and left out.
             raw = rom[start:end] if 'length' in params else rom[start:end - 1]    # without the end byte
-            item['sprites'] = [[list(raw[i:i + 4]) for i in range(0, len(raw) - 3, 4)]]
+            ents = [list(raw[i:i + 4]) for i in range(0, len(raw) - 3, 4)]
+            if 'signed' in params:
+                ents = [[e[0] - 256 if e[0] >= 128 else e[0], e[1] - 256 if e[1] >= 128 else e[1]] + e[2:] for e in ents]
+            per = max(1, resolve_value(project, params['frame']) // 4) if params.get('frame') else max(1, len(ents))
+            item['sprites'] = [[e for e in ents[i:i + per] if e != [255, 255, 255, 255] and e != [-1, -1, 255, 255]]
+                               for i in range(0, len(ents), per)] or [[]]
+            if 'tall' in params:
+                item['tall'] = 1
         if a['type'] == 'sprites':
             item['sprites'] = render_sprites(project, resolve_value(project, params.get('count', '1')))
         assets.append(item)
@@ -715,12 +745,17 @@ def generate(project):
             d['asset'] = a['type']
             if a['name'] != d['n']:
                 d['an'] = a['name']
+    builtin = {a['name']: a for a in assets if not a.get('generated')}
+    for a in assets:                        # per-tile palettes a plugin found for tile sheets: {asset: [palette | None]}
+        for n, pals in (a.pop('tilePalettes', None) or {}).items():
+            if n in builtin:
+                builtin[n]['tilePalettes'] = pals
 
     data = {
         'title': build.GAME.get('title') or build.rom_title(project.rom),
         'gameId': build.GAME.get('id'),
         'games': other_games(),
-        'game': {'entry': build.GAME.get('entry'), 'start': build.GAME.get('start'), 'bgp': resolve_bgp(), 'graphRoot': build.GAME.get('graph_root'),
+        'game': {'entry': build.GAME.get('entry'), 'start': build.GAME.get('start'), 'bgp': resolve_bgp(), 'obp': resolve_obp(), 'graphRoot': build.GAME.get('graph_root'),
                  'jumpRst': build.GAME.get('jump_table_rst'),
                  'sprites': (build.GAME.get('sprites') or {}).get('routine')},
         'generated': datetime.datetime.now().strftime('%Y-%m-%d %H:%M'),

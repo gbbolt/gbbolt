@@ -1826,12 +1826,12 @@ const tilesetCache = {};
 const tileset = key => tilesetCache[key] || (tilesetCache[key] = D.tilesets[key] ? b64(D.tilesets[key]) : null);
 const BGP = (b => [0, 1, 2, 3].map(c => (b >> (2 * c)) & 3))(G.bgp !== undefined && G.bgp !== null ? G.bgp : 0xE4);   // the game's BG palette (game.json bgp, default $E4)
 const hexRGB = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
-function blitTile(img, W, px, py, data, off, bpp) {
+function blitTile(img, W, px, py, data, off, bpp, pmap = BGP) {
   const pal = curPal().map(hexRGB);
   for (let y = 0; y < 8; y++) {
     const lo = data[off + (bpp === 1 ? y : 2 * y)] || 0, hi = bpp === 1 ? lo : (data[off + 2 * y + 1] || 0);
     for (let x = 0; x < 8; x++) {
-      const raw = ((hi >> (7 - x)) & 1) << 1 | ((lo >> (7 - x)) & 1), c = bpp === 1 ? raw : BGP[raw];
+      const raw = ((hi >> (7 - x)) & 1) << 1 | ((lo >> (7 - x)) & 1), c = bpp === 1 ? raw : pmap[raw];
       const i = ((py + y) * W + px + x) * 4;
       img.data[i] = pal[c][0]; img.data[i + 1] = pal[c][1]; img.data[i + 2] = pal[c][2]; img.data[i + 3] = 255;
     }
@@ -1848,18 +1848,26 @@ function tipLine(el, text) {
   tip.textContent = text; el.appendChild(tip); return tip;
 }
 function drawTiles(a, el, size) {
-  const data = b64(a.bytes), bpp = +(a.params.bpp || 2), per = bpp * 8;
-  const n = Math.floor(data.length / per), cols = +(a.params.width || 16), rows = Math.ceil(n / cols);
+  // param tall: 8x16 sprite tiles, each pair of tiles drawn one above the other (as the sprite shows them)
+  const data = b64(a.bytes), bpp = +(a.params.bpp || 2), per = bpp * 8, tall = 'tall' in a.params;
+  const n = Math.floor(data.length / per), cols = +(a.params.width || (tall ? 8 : 16));
+  const rows = tall ? 2 * Math.ceil(n / 2 / cols) : Math.ceil(n / cols);
+  const at = t => tall ? [((t >> 1) % cols) * 8, (2 * Math.floor((t >> 1) / cols) + (t & 1)) * 8] : [(t % cols) * 8, Math.floor(t / cols) * 8];
   const c = makeCanvas(cols * 8, rows * 8, size === 'large' ? 4 : 0), ctx = c.getContext('2d');
   const img = ctx.createImageData(c.width, c.height);
-  for (let t = 0; t < n; t++) blitTile(img, c.width, (t % cols) * 8, Math.floor(t / cols) * 8, data, t * per, bpp);
+  // a tile sheet shows the raw colours 0-3 light to dark (identity palette), unless the site data gives a tile the
+  // palette the game draws it with (a.tilePalettes: one palette byte or null per tile, e.g. found by an asset
+  // plugin for sprite sheets, where the sprite palette is chosen per sprite)
+  const tp = a.tilePalettes || [], pm = p => [0, 1, 2, 3].map(c => (p >> (2 * c)) & 3);
+  for (let t = 0; t < n; t++) { const [px, py] = at(t); blitTile(img, c.width, px, py, data, t * per, bpp, tp[t] !== undefined && tp[t] !== null ? pm(tp[t]) : [0, 1, 2, 3]); }
   ctx.putImageData(img, 0, 0);
   el.appendChild(c);
   if (size === 'large') {
-    const tip = tipLine(el, `${n} tiles, ${bpp} bit${bpp > 1 ? 's' : ''} per pixel · hover a tile`);
+    const tip = tipLine(el, `${n} tiles, ${bpp} bit${bpp > 1 ? 's' : ''} per pixel${tall ? ', in 8x16 pairs' : ''} · hover a tile`);
     c.onmousemove = e => {
       const r = c.getBoundingClientRect();
-      const t = Math.floor((e.clientY - r.top) / r.height * rows) * cols + Math.floor((e.clientX - r.left) / r.width * cols);
+      const gx = Math.floor((e.clientX - r.left) / r.width * cols), gy = Math.floor((e.clientY - r.top) / r.height * rows);
+      const t = tall ? 2 * ((gy >> 1) * cols + gx) + (gy & 1) : gy * cols + gx;
       if (t < n) tip.textContent = `tile ${t} ($${t.toString(16).toUpperCase().padStart(2, '0')}) · ROM ${romAddr(a.start + t * per)}`;
     };
   }
@@ -1940,20 +1948,22 @@ function drawHeader(a, el, size) {
   t.innerHTML = rows.map(r => `<tr><td>${r[0]}</td><td class="m" style="color:var(--muted)">${r[1]}</td><td class="m">${r[2]}</td></tr>`).join('');
   el.appendChild(t);
 }
-const OBP = [[0, 1, 2, 3], [0, 1, 0, 3]];   // OBP0 = $E4, OBP1 = $C4 (set at boot)
+// the sprite palettes: game.json "obp" [OBP0, OBP1], else OBP0 = $E4, OBP1 = $C4
+const OBP = (G.obp || [0xE4, 0xC4]).map(b => [0, 1, 2, 3].map(c => (b >> (2 * c)) & 3));
 let spriteTiles = {};                          // asset name -> chosen tile set
-function spriteCanvas(entries, ts, scale) {
+function spriteCanvas(entries, ts, scale, tall) {
   if (!entries.length) { const c = makeCanvas(8, 8, scale); return c; }
+  const sh = tall ? 16 : 8;                    // 8x16 sprites: tile & $FE on top, the next tile below
   const minX = Math.min(...entries.map(e => e[1])), minY = Math.min(...entries.map(e => e[0]));
-  const W = Math.max(...entries.map(e => e[1])) - minX + 8, H = Math.max(...entries.map(e => e[0])) - minY + 8;
+  const W = Math.max(...entries.map(e => e[1])) - minX + 8, H = Math.max(...entries.map(e => e[0])) - minY + sh;
   const c = makeCanvas(W, H, scale), ctx = c.getContext('2d');
   const img = ctx.createImageData(W, H);
   const pal = curPal().map(hexRGB);
-  for (const [y, x, tile, attr] of entries) {
+  for (const [y, x, tile, attr] of entries.slice().reverse()) {      // the first entry lies on top
     const obp = OBP[(attr >> 4) & 1];
-    for (let r = 0; r < 8; r++) {
-      const row = attr & 0x40 ? 7 - r : r;
-      const lo = ts[tile * 16 + 2 * row], hi = ts[tile * 16 + 2 * row + 1];
+    for (let r = 0; r < sh; r++) {
+      const row = attr & 0x40 ? sh - 1 - r : r, t = tall ? (tile & 0xFE) + (row >> 3) : tile;
+      const lo = ts[t * 16 + 2 * (row & 7)], hi = ts[t * 16 + 2 * (row & 7) + 1];
       for (let b = 0; b < 8; b++) {
         const bit = attr & 0x20 ? b : 7 - b;
         const ci = ((hi >> bit) & 1) << 1 | ((lo >> bit) & 1);
@@ -2001,12 +2011,14 @@ function drawSprites(a, el, size) {
 }
 function drawOAM(a, el, size) {
   // a sprite layout stored as ready-made OAM entries (y, x, tile, attributes), copied into the shadow OAM as is
-  const ts = tileset(a.tileset) || new Uint8Array(0x1800), e = a.sprites[0] || [];
+  // several frames (param frame=N bytes) are drawn side by side
+  const ts = tileset(a.tileset) || new Uint8Array(0x1800), frames = a.sprites.length ? a.sprites : [[]];
   const holder = document.createElement('div');
-  holder.style.cssText = 'display:inline-flex;padding:8px;border-radius:8px;border:1px solid var(--border);background:repeating-conic-gradient(var(--panel) 0 25%, var(--panel2) 0 50%) 0 0/12px 12px';
-  holder.appendChild(spriteCanvas(e, ts, size === 'large' ? 4 : 2));
+  holder.style.cssText = 'display:inline-flex;flex-wrap:wrap;gap:10px;align-items:center;padding:8px;border-radius:8px;border:1px solid var(--border);background:repeating-conic-gradient(var(--panel) 0 25%, var(--panel2) 0 50%) 0 0/12px 12px';
+  (size === 'large' ? frames : frames.slice(0, 4)).forEach(e => holder.appendChild(spriteCanvas(e, ts, size === 'large' ? 4 : 2, a.tall)));
   el.appendChild(holder);
-  if (size === 'large') tipLine(el, `${e.length} OAM entries (y, x, tile, attributes) copied straight into the shadow OAM · tile data from running ${a.tileset} · checkerboard = transparent`);
+  const n = frames.reduce((s, e) => s + e.length, 0);
+  if (size === 'large') tipLine(el, `${frames.length > 1 ? frames.length + ' frames, ' : ''}${n} sprites (y, x, tile, attributes${a.tall ? '; 8x16' : ''}) · tile data from running ${a.tileset} · checkerboard = transparent`);
 }
 // ---- display parts for game-defined assets (<game>/assets/*.py, see tools/assets.py)
 // pixels: base64 shade indices (0-3, 255 = transparent); packed: 'zlib' when they are
@@ -2388,8 +2400,17 @@ function renderAssets(sel) {
           <table class="kv">${Object.entries(a.params).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="m">${hl(v, 'doc')}</td></tr>`).join('')}
           <tr><td>data</td><td><a href="#/code/${encodeURIComponent(a.name)}">${esc(a.name)} in the disassembly</a></td></tr>
           <tr><td>used by</td><td>${users}</td></tr></table></div></div>
-      <h3>Bytes</h3><div class="hexdump">${esc(hexdump(a, 512))}</div>`;
+      <div id="aabout"></div><h3>Bytes</h3><div class="hexdump">${esc(hexdump(a, 512))}</div>`;
     drawAsset(a, $('#astage'), 'large');
+    // plugin assets about this data block ('unit': its label), e.g. what the game assembles from a tile sheet
+    (D.assets || []).filter(x => x.generated && x.unit === a.name).forEach(x => {
+      const box = document.createElement('div');
+      box.innerHTML = `<h3><a href="#/assets/${encodeURIComponent(x.name)}">${esc(x.title || x.name)}</a></h3>
+        <div style="color:var(--muted);font-size:12.5px;margin-bottom:8px">${esc(x.subtitle || '')}</div>
+        <div style="max-width:1000px">${(x.doc || []).map(d => `<p style="margin-top:0">${hl(d, 'doc')}</p>`).join('')}</div><div class="astage"></div>`;
+      $('#aabout').appendChild(box);
+      drawAsset(x, $('.astage', box), 'large');
+    });
   } else {
     const groups = {};
     (D.assets || []).forEach(a => { const g = a.generated ? a.group : a.type; (groups[g] = groups[g] || []).push(a); });

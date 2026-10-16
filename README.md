@@ -130,16 +130,17 @@ TitleScreenTilemap::
 |---|---|---|
 | `logo` | — | the 48-byte Nintendo logo as the boot ROM draws it |
 | `header` | `range=$0100-$014F` | decoded cartridge header, checksums recomputed |
-| `tiles` | `bpp=1\|2`, `length=`, `width=` (tiles per row, default 16) | a tile sheet, hover for tile number / ROM address |
+| `tiles` | `bpp=1\|2`, `length=`, `width=` (tiles per row, default 16), `tall` (8x16 sprite tiles: pairs one above the other, 8 pairs per row by default) | a tile sheet, hover for tile number / ROM address |
 | `tilemap` | `width=`, `height=`, `tiles=Routine` or `tiles=Routine(hl=Label,bc=$1000)` | the screen exactly as the game shows it |
 | `sprites` | `count=`, `tiles=...` | every sprite id, drawn by the game's own routine (`game.json` → `sprites`) |
-| `oam` | `tiles=...`, `end=$FD` or `length=` | a sprite layout stored as ready-made OAM entries |
+| `oam` | `tiles=...`, `end=$FD` or `length=`, `frame=` (bytes per frame), `signed` (y / x are signed offsets), `tall` (8x16 sprites) | a sprite layout stored as OAM entries (y, x, tile, attributes); several frames side by side; sprite palettes from `game.json` → `obp` |
 | `rows` | `tiles=...`, `width=` or `newline=`, `blank=` | a string of tiles (messages, text panels) |
 
 For tilemaps, `tiles=` names the game's own tile-loading routine. The generator runs it
  (with the given registers) and uses the VRAM it leaves behind, so no tile layout has to be
 described by hand. Several loaders can be chained with `+` (a base tile set, then what a screen loads
-over it). `game.json` → `tile_addressing: "8800"` for games whose BG uses the signed tile numbers.
+over it). `game.json` → `tile_addressing: "8800"` for games whose BG uses the signed tile numbers. In banked
+games the loader runs with its own bank switched in and its bank writes switch banks.
 
 ### Asset plugins
 
