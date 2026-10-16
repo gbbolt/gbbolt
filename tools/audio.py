@@ -21,6 +21,7 @@ src/sound.json (entry points, request bytes, the music channel structs).
     python tools/audio.py music 5         one item (music / sfx / wave / noise)
 """
 import json
+import math
 import os
 import subprocess
 import sys
@@ -83,7 +84,10 @@ def load_config():
     # channel, 0 = unused)}: a channel loops when its fields repeat an earlier state (engines without pattern lists).
     # Channel records of several bytes: 'stride' (bytes from one channel's record to the next; the fields and
     # 'active' are then addresses in channel 0's record) and 'active_free' (the value of 'active' that marks an
-    # unused channel instead of 0).
+    # unused channel instead of 0). 'skip_silent': a channel that has not sounded a music note yet does not count
+    # (needs channel i of the record = sound channel i). The song's loop runs for the least common multiple of
+    # the channels' loop lengths, from the latest loop start.
+    # 'music_channels' + 'entry_restart': see Timeline.track_sections.
     lc = cfg.get('loop_channels')
     if lc:
         lc['fields'] = [(addr(a), n) for a, n in lc['fields']]
@@ -446,6 +450,23 @@ def highpass(x, a=0.9985, block=2048):
 
 
 # ---------------------------------------------------------------- timeline
+def song_period(loops):
+    """(loop start, length) of a song from its channels' (loop start, length): from the latest start, for the
+    least common multiple of the lengths. A part whose length is a frame or two off a whole fraction of the
+    longest (tempo rounding) would stretch that past the render cap: then the longest length counts. Lengths
+    that don't line up within a few passes give no loop (None)."""
+    loops = list(loops)
+    n = 1
+    for _, m in loops:
+        n = n * m // math.gcd(n, m) if m else n
+    longest = max(m for _, m in loops)
+    if n > 4 * longest:
+        if not all(m and abs(longest / round(longest / m) - m) <= 2 for _, m in loops):
+            return None
+        n = longest
+    return max(s for s, _ in loops), n
+
+
 class Timeline:
     """Per channel: notes (from a trigger until silence or the next trigger) with
     frame-by-frame frequency and volume, plus panning, master volume, waveforms,
@@ -463,6 +484,8 @@ class Timeline:
         self.last_pat = [0] * 4
         self.looped = {}
         self.list_seen = [{} for _ in range(4)]
+        self.entry_pat = [{} for _ in range(4)]   # list entry -> pattern pointer in the frame it started
+        self.loop_at = None                        # (loop start frame, song period in frames) once known
         self.loop = None                  # (loop start frame, frame where it jumped back)
 
     def owner(self, i):
@@ -553,19 +576,29 @@ class Timeline:
             prev = self.last_list[i]
             pat = eng.word(base + mc['pattern_ptr'])
             # a pattern list entry that loops onto itself: the pattern pointer jumps back to the
-            # start of the pattern (a repeat inside a pattern, $9B..$9C in some engines, does not count)
-            restart = lst == prev and pat < self.last_pat[i] and pat == eng.word(lst)
+            # start of the pattern (a repeat inside a pattern, $9B..$9C in some engines, does not count).
+            # With 'entry_restart' (banked engines whose list pointer stays on the entry being played: the
+            # list word, read through the CPU's map, may come from another bank once the update returns),
+            # the pattern position seen when the entry started counts as its start too.
+            starts = (eng.word(lst), self.entry_pat[i].get(lst)) if mc.get('entry_restart') else (eng.word(lst),)
+            restart = lst == prev and pat < self.last_pat[i] and pat in starts
             if lst != prev or restart:
-                if prev is not None and (lst < prev or restart) and self.loop is None:
-                    # the song repeats once every channel has looped (a drum part may loop early)
-                    self.looped[i] = self.list_seen[i].get(lst, 0)
+                if (prev is not None and (lst < prev or restart) and self.loop is None and i not in self.looped
+                        and not self.cfg.get('loop_channels')):          # (state compare decides instead)
+                    # each channel loops with its own length: the song repeats from the latest loop start,
+                    # once every channel's length has come round (their least common multiple)
+                    start = self.list_seen[i].get(lst, 0)
+                    self.looped[i] = (start, f - start)
                     active = [k for k, b in enumerate(mc['structs']) if eng.word(b + mc['list_ptr'])]
                     if all(k in self.looped for k in active):
-                        self.loop = (self.looped[i], f)
+                        self.loop_at = song_period(self.looped.values())
                 self.list_seen[i].setdefault(lst, f)
+                self.entry_pat[i].setdefault(lst, pat)
                 self.sections[i].append([f, eng.word(lst)])
                 self.last_list[i] = lst
             self.last_pat[i] = pat
+        if self.loop is None and self.loop_at and f >= self.loop_at[0] + self.loop_at[1]:
+            self.loop = (self.loop_at[0], f)
 
     def finish(self, frames):
         for i in range(4):
@@ -603,7 +636,8 @@ def render(rom, syms, cfg, kind, number, pokes=None, hz=None, max_seconds=None, 
     acc, count = 0.0, 0
     lc = cfg.get('loop_channels')
     states = [{} for _ in range(lc['count'])] if lc and k.get('loops') else None
-    prev_state, looped = [None] * (lc['count'] if lc else 0), {}
+    prev_state, looped = [None] * (lc['count'] if lc else 0), {}      # channel -> (loop start, its length)
+    loop_at = None
 
     def chan_active(mem, i):
         if not lc.get('active'):
@@ -623,13 +657,20 @@ def render(rom, syms, cfg, kind, number, pokes=None, hz=None, max_seconds=None, 
                               for a, n in lc['fields'])
                 if st != prev_state[i]:                  # (compared where it changes: at the notes)
                     if st in states[i]:
-                        looped[i] = states[i][st]
+                        looped[i] = (states[i][st], count - states[i][st])
                     else:
                         states[i][st] = count
                     prev_state[i] = st
             active = [i for i in range(lc['count']) if chan_active(mem, i)]
-            if active and all(i in looped for i in active):   # the song repeats once every channel has looped
-                tl.loop = (max(looped[i] for i in active), count)
+            if lc.get('skip_silent'):     # channels i = sound channels i: one that never sounded a note doesn't count
+                active = [i for i in active if any(x.get('own') == 'music' for x in tl.notes[i])
+                          or (tl.open[i] and tl.open[i].get('own') == 'music')]
+            if loop_at is None and active and all(i in looped for i in active):
+                # each channel loops with its own length: the song repeats from the latest loop start, once
+                # every channel's length has come round (their least common multiple)
+                loop_at = song_period(looped[i] for i in active)
+            if loop_at and count >= loop_at[0] + loop_at[1]:
+                tl.loop = (loop_at[0], count)
         if fixed_loop and count >= fixed_loop[1]:
             tl.loop = tuple(fixed_loop)
         if k.get('loops') and tl.loop:             # once through: stop where it jumps back
@@ -651,7 +692,20 @@ def render(rom, syms, cfg, kind, number, pokes=None, hz=None, max_seconds=None, 
     mix = sum(stems)
     timeline = tl.finish(count)
     loop = tl.loop[0] / FRAME_HZ if tl.loop else None
-    if k.get('loops') and not tl.loop and count >= int(k['max_seconds'] * FRAME_HZ) - 1:
+    capped = k.get('loops') and not tl.loop and count >= int(k['max_seconds'] * FRAME_HZ) - 1
+    last = max((x['t'] + x['d'] for ch in timeline['ch'] for x in ch), default=0)
+    if capped and last and last < count - 2 * FRAME_HZ:
+        # the song ended on rests that go on forever (a jingle whose channels wait in a rest loop): it ends
+        # a second after its last note instead of at the limit
+        count = int(last + FRAME_HZ)
+        cut = int(count * RATE / FRAME_HZ)
+        stems = [s[:cut] for s in stems]
+        mix = mix[:cut]
+        timeline['frames'] = count
+        if 'sections' in timeline:
+            timeline['sections'] = [[x for x in sec if x[0] < count] for sec in timeline['sections']]
+        capped = False
+    if capped:
         fade = min(len(mix), int(RATE * 4))       # never looped within the limit: fade out
         ramp = np.linspace(1.0, 0.0, fade)[:, None]
         for s in stems + [mix]:
